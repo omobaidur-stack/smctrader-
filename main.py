@@ -1,35 +1,43 @@
-# main.py
+import os
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import threading
-from heatmap_engine import get_heatmap
-from footprint_engine import get_footprint # নতুন ইমপোর্ট
-from orderbook_stream import start_stream
+from orderbook_stream import footprint_data, whale_alerts, start_streams
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(start_streams())
 
-# ১ নম্বর টুলের এন্ডপয়েন্ট (আগের মতোই আছে)
-@app.get("/heatmap/{symbol}")
-def heatmap(symbol: str):
-    return get_heatmap(symbol.upper())
+# ৩ নম্বর টুল API: Whale Alerts
+@app.get("/whales")
+async def get_whales():
+    return {"alerts": whale_alerts}
 
-# ২ নম্বর টুলের এন্ডপয়েন্ট (নতুন যোগ হয়েছে)
-@app.get("/footprint/{symbol}")
-def footprint(symbol: str):
-    return get_footprint(symbol.upper())
+# ৪ নম্বর টুল API: AI SMC Interpreter
+@app.get("/ai-smc/{symbol}")
+async def get_ai_smc(symbol: str):
+    symbol = symbol.upper()
+    data = footprint_data.get(symbol, [])
+    
+    # এখানে আমরা SMC লজিকগুলো প্রসেস করি
+    results = []
+    if len(data) > 10:
+        results.append({
+            "concept": "Institutional Flow", 
+            "type": "ICT Engine", 
+            "msg": f"Smart Money activity detected on {symbol}.", 
+            "color": "#02c076"
+        })
+    
+    return {"symbol": symbol, "results": results}
 
 @app.get("/")
-def home():
-    return {"status": "ForexTechBD Multi-Asset Engine (Heatmap + Footprint) is Live"}
+async def root():
+    return {"status": "FTBD Tool 3 & 4 Online (XAU, BTC, ETH)"}
 
-def run_stream():
-    start_stream()
-
-threading.Thread(target=run_stream, daemon=True).start()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
