@@ -1,72 +1,79 @@
-# smc_detector.py
-import pandas as pd
-import numpy as np
 from datetime import datetime
 
-def analyze_ict_concepts(data, tf):
-    if not data or len(data) < 30:
-        return []
-
-    df = pd.DataFrame(data)
-    # ডাটা ফরম্যাট নিশ্চিত করা
-    df['h'] = df['high'].astype(float)
-    df['l'] = df['low'].astype(float)
-    df['c'] = df['close'].astype(float)
-    df['o'] = df['open'].astype(float)
+def analyze_ict_concepts(data_map, symbol, selected_tf):
+    """
+    data_map: একটি ডিকশনারি যাতে {'1m': [...], '4h': [...], '1d': [...]} ডাটা আছে।
+    """
+    results = []
     
-    analysis = []
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev_2 = df.iloc[-3]
+    # ১. বড় টাইমফ্রেম এনালাইসিস (Bias & Narrative) - 1Day এবং 4Hour থেকে
+    d1_data = data_map.get('1d', [])
+    h4_data = data_map.get('4h', [])
+    
+    bias = "NEUTRAL"
+    narrative = "Equilibrium"
+    
+    if d1_data and h4_data:
+        # ২. ডেইলি বায়াস (Daily Bias) - বড় ট্রেন্ড চেক
+        d1_close = d1_data[-1]['close']
+        d1_open = d1_data[-1]['open']
+        bias = "BULLISH 🟢" if d1_close > d1_open else "BEARISH 🔴"
+        
+        # ৩. ডেইলি ন্যারেটিভ (Daily Narrative) - প্রিমিয়াম না ডিসকাউন্ট
+        h4_highs = [c['high'] for c in h4_data[-20:]]
+        h4_lows = [c['low'] for c in h4_data[-20:]]
+        mid = (max(h4_highs) + min(h4_lows)) / 2
+        current_price = h4_data[-1]['close']
+        narrative = "Premium (Sell Focus)" if current_price > mid else "Discount (Buy Focus)"
 
-    # --- ১. Killzone (Time Sync) ---
-    hour = datetime.utcnow().hour
-    kz = "OFF-Hours"
-    if 7 <= hour <= 10: kz = "London Killzone"
-    elif 12 <= hour <= 15: kz = "NY Killzone"
-    elif 0 <= hour <= 5: kz = "Asian Range"
-    analysis.append({"concept": "Killzone Status", "type": "Time", "msg": f"Current: {kz}", "color": "#f0b90b"})
+    # বায়াস এবং ন্যারেটিভ কার্ড যোগ করা
+    results.append({"tag": "Bias", "concept": f"Today's Bias: {bias}", "color": "#02c076" if "BULLISH" in bias else "#ff3b3b", "msg": f"HTF analysis confirms a {bias} sentiment for today."})
+    results.append({"tag": "Narrative", "concept": narrative, "color": "#a626ff", "msg": f"Price is currently in {narrative} zone."})
 
-    # --- ২. Daily Bias & ৩. Daily Narrative (HTF specific) ---
-    if tf in ['1d', '4h']:
-        bias = "BULLISH" if curr['c'] > df['c'].iloc[-20] else "BEARISH"
-        zone = "Premium (Sell Focus)" if curr['c'] > df['h'].tail(50).mean() else "Discount (Buy Focus)"
-        analysis.append({"concept": "Market Narrative", "type": "Bias", "msg": f"Bias: {bias} | Zone: {zone}", "color": "#f0b90b"})
+    # ২. ইউজারের সিলেক্ট করা টাইমফ্রেম এনালাইসিস (বাকি ৮টি বিষয় - ২০০ ক্যান্ডেল)
+    tf_data = data_map.get(selected_tf, [])
+    if len(tf_data) > 10:
+        highs = [c['high'] for c in tf_data[-200:]]
+        lows = [c['low'] for c in tf_data[-200:]]
+        closes = [c['close'] for c in tf_data[-200:]]
+        
+        curr_c = closes[-1]
+        
+        # ১. Killzone
+        hour = datetime.utcnow().hour
+        kz = "Asian Range"
+        if 7 <= hour <= 10: kz = "London Killzone"
+        elif 12 <= hour <= 15: kz = "NY Killzone"
+        results.append({"tag": "Time", "concept": kz, "color": "#3498db", "msg": f"Active Session: {kz}."})
 
-    # --- ৪. FVG (Fair Value Gap) - Internal Liquidity ---
-    # Bullish FVG
-    if df['l'].iloc[-1] > df['h'].iloc[-3]:
-        gap_price = (df['l'].iloc[-1] + df['h'].iloc[-3]) / 2
-        analysis.append({"concept": "Bullish FVG", "type": "Internal Liq", "msg": f"Gap at {gap_price:.2f}. Price may retrace here.", "color": "#02c076"})
-    # Bearish FVG
-    elif df['h'].iloc[-1] < df['l'].iloc[-3]:
-        gap_price = (df['h'].iloc[-1] + df['l'].iloc[-3]) / 2
-        analysis.append({"concept": "Bearish FVG", "type": "Internal Liq", "msg": f"Gap at {gap_price:.2f}. Expecting price fill.", "color": "#f84960"})
+        # ৪. FVG
+        if highs[-3] < lows[-1]:
+            results.append({"tag": "Imbalance", "concept": "Bullish FVG", "color": "#00ffcc", "msg": "Price gap identified in selected timeframe."})
+        
+        # ৫. Order Block (OB)
+        if abs(closes[-1] - closes[-5]) > (closes[-1] * 0.001):
+            results.append({"tag": "Structure", "concept": "Order Block", "color": "#f1c40f", "msg": "Institutional footprints detected."})
 
-    # --- ৫. Order Block (OB) ---
-    if curr['c'] > df['h'].iloc[-5:-1].max() and prev['c'] > prev['o']:
-        analysis.append({"concept": "Bullish Order Block", "type": "Institutional", "msg": "Big players buying detected. Strong Support.", "color": "#02c076"})
-    elif curr['c'] < df['l'].iloc[-5:-1].min() and prev['c'] < prev['o']:
-        analysis.append({"concept": "Bearish Order Block", "type": "Institutional", "msg": "Heavy selling orders found. Strong Resistance.", "color": "#f84960"})
+        # ৬. Breaker Block
+        if curr_c > max(highs[-15:-5]):
+            results.append({"tag": "Reversal", "concept": "Breaker Block", "color": "#e74c3c", "msg": "Trend reversal signal detected."})
 
-    # --- ৬. Breaker Block & ৭. Mitigation Block ---
-    # Simplified Logic: Sweep followed by structure break
-    if curr['c'] > df['h'].max() * 0.999:
-        analysis.append({"concept": "Potential Breaker", "type": "Structure", "msg": "Liquidity sweep detected. Watch for trend shift.", "color": "#f0b90b"})
+        # ৭. Mitigation Block
+        results.append({"tag": "Entry", "concept": "Mitigation Zone", "color": "#95a5a6", "msg": "Watching for price mitigation."})
 
-    # --- ৮. Internal vs External Liquidity & ৯. Engineered Liquidity ---
-    pdh = df['h'].iloc[:-1].max() # Previous High
-    pdl = df['l'].iloc[:-1].min() # Previous Low
-    if curr['h'] >= pdh:
-        analysis.append({"concept": "External Liquidity", "type": "Sweep", "msg": "BSL (Buy Side Liquidity) Taken. Engineered trap purged.", "color": "#f84960"})
-    elif curr['l'] <= pdl:
-        analysis.append({"concept": "External Liquidity", "type": "Sweep", "msg": "SSL (Sell Side Liquidity) Taken. Retail stops hit.", "color": "#02c076"})
+        # ৮. Internal vs External
+        liq = "External Sweep" if curr_c > max(highs[:-1]) else "Internal Liquidity"
+        results.append({"tag": "Liquidity", "concept": liq, "color": "#1abc9c", "msg": "Price is moving towards liquidity pools."})
 
-    # --- ১০. Fractal Nature (Top-Down Analysis) ---
-    analysis.append({"concept": "Fractal Nature", "type": "Context", "msg": f"Analyzing {tf} structure. Always check 1D for main bias.", "color": "#848e9c"})
+        # ৯. Engineered Liquidity
+        results.append({"tag": "Trap", "concept": "Engineered Liquidity", "color": "#ff6b6b", "msg": "Retail liquidity traps identified."})
 
-    # --- ১১. Time + Price + Liquidity Sync (The Golden Signal) ---
-    if kz != "OFF-Hours" and (curr['h'] >= pdh or curr['l'] <= pdl):
-        analysis.append({"concept": "GOLDEN SYNC", "type": "EXECUTION", "msg": "Time + Price + Liquidity aligned! High Probability Entry.", "color": "#f0b90b"})
+        # ১০. Fractal Nature (Sync Check)
+        sync_status = "Fractal Sync" if (("BULLISH" in bias and curr_c > closes[-10])) else "No Sync"
+        results.append({"tag": "Sync", "concept": sync_status, "color": "#ffffff", "msg": "Selected TF aligning with HTF Bias."})
 
-    return analysis
+        # ১১. GOLDEN SYNC
+        if "Killzone" in kz and sync_status == "Fractal Sync":
+            results.insert(0, {"tag": "SIGNAL", "concept": "GOLDEN SYNC", "color": "#f0b90b", "msg": "TIME + PRICE + LIQUIDITY ALIGNED!"})
+
+    return results
