@@ -4,6 +4,7 @@ import httpx
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from smc_detector import analyze_ict_concepts
+from orderbook_stream import whale_alerts, start_streams # Whale Tracker ইমপোর্ট করা হলো
 
 app = FastAPI()
 
@@ -15,12 +16,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# গ্লোবাল ডাটা স্টোরেজ (বিভিন্ন টাইমফ্রেমের জন্য)
-# আমরা ৪টি বড় টাইমফ্রেম এবং ইউজারের সিলেক্ট করা টাইমফ্রেমের ডাটা রাখবো
+# গ্লোবাল ডাটা স্টোরেজ
 market_data_store = {
-    "XAUUSD": {"1m": [], "5m": [], "15m": [], "1h": [], "4h": [], "1d": []},
-    "BTCUSDT": {"1m": [], "5m": [], "15m": [], "1h": [], "4h": [], "1d": []},
-    "ETHUSDT": {"1m": [], "5m": [], "15m": [], "1h": [], "4h": [], "1d": []}
+    "XAUUSD": {"5m": [], "15m": [], "1h": [], "4h": [], "1d": []},
+    "BTCUSDT": {"5m": [], "15m": [], "1h": [], "4h": [], "1d": []},
+    "ETHUSDT": {"5m": [], "15m": [], "1h": [], "4h": [], "1d": []}
 }
 
 async def fetch_candles(symbol, interval, limit=200):
@@ -28,22 +28,18 @@ async def fetch_candles(symbol, interval, limit=200):
     bin_sym = "PAXGUSDT" if "XAU" in symbol else symbol
     url = f"https://api.binance.com/api/v3/klines?symbol={bin_sym}&interval={interval}&limit={limit}"
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            response = await client.get(url, timeout=10)
+            response = await client.get(url)
             if response.status_code == 200:
                 raw_data = response.json()
-                # ক্যান্ডেল ফরম্যাট করা
-                candles = []
-                for c in raw_data:
-                    candles.append({
-                        "open": float(c[1]),
-                        "high": float(c[2]),
-                        "low": float(c[3]),
-                        "close": float(c[4]),
-                        "time": c[0]
-                    })
-                return candles
+                return [{
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "time": c[0]
+                } for c in raw_data]
         except Exception as e:
             print(f"Error fetching {symbol} {interval}: {e}")
     return []
@@ -51,7 +47,7 @@ async def fetch_candles(symbol, interval, limit=200):
 async def sync_all_data():
     """সব অ্যাসেট এবং দরকারি টাইমফ্রেম সিঙ্ক করা"""
     symbols = ["XAUUSD", "BTCUSDT", "ETHUSDT"]
-    intervals = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    intervals = ["5m", "15m", "1h", "4h", "1d"] # আপনার রিকোয়েস্ট অনুযায়ী টাইমফ্রেম
     
     while True:
         for s in symbols:
@@ -59,23 +55,31 @@ async def sync_all_data():
                 candles = await fetch_candles(s, i)
                 if candles:
                     market_data_store[s][i] = candles
-        # সার্ভারের ওপর চাপ কমাতে ২০ সেকেন্ড পর পর রিফ্রেশ
-        await asyncio.sleep(20)
+                    print(f"Synced: {s} {i}")
+        await asyncio.sleep(30) # সার্ভারের চাপ কমাতে ৩০ সেকেন্ড গ্যাপ
 
 @app.on_event("startup")
 async def startup_event():
+    # দুটি কাজই একসাথে শুরু হবে
     asyncio.create_task(sync_all_data())
+    asyncio.create_task(start_streams()) # ৩ নম্বর টুল (Whale) চালু করা হলো
 
+# --- ৩ নম্বর টুল (Whale Tracker) এন্ডপয়েন্ট ---
+@app.get("/whales")
+async def get_whales():
+    return {"alerts": whale_alerts if whale_alerts else [], "status": "Online"}
+
+# --- ৪ নম্বর টুল (AI SMC) এন্ডপয়েন্ট ---
 @app.get("/ai-smc/{symbol}")
 async def get_ai_smc(symbol: str, tf: str = Query("15m")):
     symbol = symbol.upper()
-    # নির্দিষ্ট অ্যাসেটের সব টাইমফ্রেম ডাটা smc_detector-এ পাঠানো
     asset_data = market_data_store.get(symbol, {})
     
+    # ডাটা এখনো সিঙ্ক না হয়ে থাকলে মেসেজ দিবে
     if not asset_data.get("1d") or not asset_data.get(tf):
         return {"symbol": symbol, "tf": tf, "results": [], "msg": "Booting AI Engine... Fetching 200 Candles."}
 
-    # smc_detector এর analyze_ict_concepts কল করা
+    # smc_detector কল করা
     analysis_results = analyze_ict_concepts(asset_data, symbol, tf)
     
     return {
@@ -86,7 +90,7 @@ async def get_ai_smc(symbol: str, tf: str = Query("15m")):
 
 @app.get("/")
 async def root():
-    return {"status": "FTBD Multi-TF Engine Online", "active_assets": ["XAU", "BTC", "ETH"]}
+    return {"status": "FTBD Quant AI Engine is Live", "active_assets": ["XAU", "BTC", "ETH"]}
 
 if __name__ == "__main__":
     import uvicorn
